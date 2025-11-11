@@ -63,5 +63,11 @@
         "type": "string",
         "default": "",
         "_special": "select_provider"
+    },
+    "enabled_umo_list": {
+        "description": "允许使用 RAGFlow 功能的 unified_msg_origin 列表",
+        "hint":"为空则表示所有群组都可以使用",
+        "type": "list",
+        "default": []
     }
 }

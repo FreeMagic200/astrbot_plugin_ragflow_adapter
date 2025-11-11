@@ -39,6 +39,9 @@ class RAGFlowAdapterPlugin(Star):
         self.rag_archive_summarize_enabled = False
         self.rag_archive_summarize_persona_id = ""
         self.rag_archive_summarize_provider_id = ""
+        
+        # UMO 白名单配置
+        self.enabled_umo_list = []
 
     async def initialize(self):
         """
@@ -70,6 +73,9 @@ class RAGFlowAdapterPlugin(Star):
             "rag_archive_summarize_persona_id", "")
         self.rag_archive_summarize_provider_id = self.config.get(
             "rag_archive_summarize_provider_id", "")
+        
+        # 加载 UMO 白名单配置
+        self.enabled_umo_list = self.config.get("enabled_umo_list", [])
 
         # 打印日志
         logger.info("RAGFlow 适配器插件已初始化。")
@@ -100,6 +106,11 @@ class RAGFlowAdapterPlugin(Star):
                     f"      总结 Persona: {self.rag_archive_summarize_persona_id or '未指定'}")
                 logger.info(
                     f"      总结 Provider: {self.rag_archive_summarize_provider_id or '未指定'}")
+        
+        # 打印 UMO 白名单配置日志
+        logger.info(f"  启用 UMO 白名单: {'是' if self.enabled_umo_list else '否'}")
+        if self.enabled_umo_list:
+            logger.info(f"    允许的 UMO 列表: {self.enabled_umo_list}")
         logger.info("========================")
 
     def _setup_rewriter(self):
@@ -132,6 +143,12 @@ class RAGFlowAdapterPlugin(Star):
         """
         在 LLM 请求前，自动执行 RAG 检索并注入上下文。
         """
+        # 检查 UMO 白名单
+        if self.enabled_umo_list:
+            current_umo = event.unified_msg_origin
+            if current_umo not in self.enabled_umo_list:
+                logger.debug(f"UMO '{current_umo}' 不在白名单中，跳过 RAGFlow 处理")
+                return
         # 1. 重写查询
         rewritten_queries = []
         if self.enable_query_rewrite and self.query_rewrite_manager:
