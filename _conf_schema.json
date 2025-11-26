@@ -1,73 +1,85 @@
 {
-    "ragflow_base_url": {
-        "description": "RAGFlow 服务的 API 地址",
-        "type": "string",
-        "default": "http://127.0.0.1:8000/"
-    },
-    "ragflow_api_key": {
-        "description": "RAGFlow 的 API Key",
-        "type": "string",
-        "default": ""
-    },
-    "ragflow_kb_ids": {
-        "description": "要查询的 RAGFlow 知识库 ID 列表",
-        "type": "list",
-        "default": []
-    },
-    "enable_query_rewrite": {
-        "description": "是否启用查询重写以优化用户输入",
-        "type": "bool",
-        "default": false
-    },
-    "query_rewrite_provider_key": {
-        "description": "用于查询重写的 LLM Provider",
-        "type": "string",
-        "default": "",
-        "_special": "select_provider"
-    },
-    "rag_injection_method": {
-        "description": "RAG 检索内容的注入方式",
-        "type": "string",
-        "hint": "user_prompt: 注入用户消息前; system_prompt: 注入系统消息; insert_system_prompt: 作为新的系统消息插入",
-        "options": ["user_prompt", "system_prompt", "insert_system_prompt"],
-        "default": "system_prompt"
-    },
-    "rag_archive_enabled": {
-        "description": "[TODO] 是否启用对话自动归档功能",
-        "type": "bool",
-        "default": false
-    },
-    "rag_archive_dataset_id": {
-        "description": "[TODO] 用于存放对话文档的数据集 ID",
-        "type": "string",
-        "default": ""
-    },
-    "rag_archive_threshold": {
-        "description": "[TODO] 触发归档的消息数量阈值 (也是单次归档的消息数)",
-        "type": "int",
-        "default": 40
-    },
-    "rag_archive_summarize_enabled": {
-        "description": "[TODO] 上传前是否调用 LLM 进行总结",
-        "type": "bool",
-        "default": false
-    },
-    "rag_archive_summarize_persona_id": {
-        "description": "[TODO] 用于总结的 Persona 人格 ID",
-        "type": "string",
-        "default": "",
-        "_special": "select_persona"
-    },
-    "rag_archive_summarize_provider_id": {
-        "description": "[TODO] 用于总结的 LLM Provider",
-        "type": "string",
-        "default": "",
-        "_special": "select_provider"
-    },
-    "enabled_umo_list": {
-        "description": "允许使用 RAGFlow 功能的 unified_msg_origin 列表",
-        "hint":"为空则表示所有群组都可以使用",
-        "type": "list",
-        "default": []
-    }
+  "ragflow_base_url": {
+    "description": "RAGFlow 服务的 API 地址",
+    "type": "string",
+    "default": "http://127.0.0.1:8000/"
+  },
+  "ragflow_api_key": {
+    "description": "RAGFlow 的 API Key",
+    "type": "string",
+    "default": ""
+  },
+  "ragflow_kb_ids": {
+    "description": "要查询的 RAGFlow 知识库 ID 列表",
+    "type": "list",
+    "default": []
+  },
+  "ragflow_rerank_model": {
+    "description": "RAGFlow 使用的重排序模型",
+    "type": "string",
+    "hint": "留空则不使用重排序模型",
+    "default": ""
+  },
+  "ragflow_cross_lang": {
+    "description": "要使用的 RAGFlow 跨语言列表 ",
+    "type": "list",
+    "hint": "留空则不使用跨语言检索",
+    "default": []
+  },
+  "enable_query_rewrite": {
+    "description": "是否启用查询重写以优化用户输入",
+    "type": "bool",
+    "default": false
+  },
+  "query_rewrite_provider_key": {
+    "description": "用于查询重写的 LLM Provider",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider"
+  },
+  "rag_injection_method": {
+    "description": "RAG 检索内容的注入方式",
+    "type": "string",
+    "hint": "user_prompt: 注入用户消息前; system_prompt: 注入系统消息; insert_system_prompt: 作为新的系统消息插入",
+    "options": ["user_prompt", "system_prompt", "insert_system_prompt"],
+    "default": "system_prompt"
+  },
+  "rag_archive_enabled": {
+    "description": "[TODO] 是否启用对话自动归档功能",
+    "type": "bool",
+    "default": false
+  },
+  "rag_archive_dataset_id": {
+    "description": "[TODO] 用于存放对话文档的数据集 ID",
+    "type": "string",
+    "default": ""
+  },
+  "rag_archive_threshold": {
+    "description": "[TODO] 触发归档的消息数量阈值 (也是单次归档的消息数)",
+    "type": "int",
+    "default": 40
+  },
+  "rag_archive_summarize_enabled": {
+    "description": "[TODO] 上传前是否调用 LLM 进行总结",
+    "type": "bool",
+    "default": false
+  },
+  "rag_archive_summarize_persona_id": {
+    "description": "[TODO] 用于总结的 Persona 人格 ID",
+    "type": "string",
+    "default": "",
+    "_special": "select_persona"
+  },
+  "rag_archive_summarize_provider_id": {
+    "description": "[TODO] 用于总结的 LLM Provider",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider"
+  },
+  "enabled_umo_list": {
+    "description": "允许使用 RAGFlow 功能的 unified_msg_origin 列表",
+    "hint": "为空则表示所有群组都可以使用",
+    "type": "list",
+    "default": []
+  }
 }
