@@ -1,289 +1,137 @@
 import json
-import asyncio
-from typing import TYPE_CHECKING, Any, Dict, List, Union
+import re
+from typing import TYPE_CHECKING, Any, List
+
 from astrbot.api import logger
 
 if TYPE_CHECKING:
     from astrbot.api.provider import Provider
 
 
-class QueryRewriterBase:
-    """查询改写器基类"""
+class UnifiedQueryRewriter:
+    """
+    统一查询重写器 (Optimized)
+    将意图识别、指代消解、多问题拆分合并为一次 LLM 调用，极大降低延迟。
+    """
 
     def __init__(self, provider: "Provider"):
         if not provider:
-            raise ValueError("Provider must be provided for QueryRewriter.")
+            raise ValueError("Provider must be provided.")
         self.provider = provider
 
     async def _get_completion(self, prompt: str) -> str:
-        """使用传入的 provider 生成回答"""
-        logger.debug(
-            f"发送到 LLM 的 Prompt: \n---PROMPT---\n{prompt}\n---END PROMPT---")
+        """基础 LLM 调用"""
         try:
             resp = await self.provider.text_chat(prompt=prompt)
-            completion_text = resp.completion_text.strip(
-            ) if resp and resp.completion_text else ""
-            logger.debug(f"从 LLM 收到的原始响应: {completion_text}")
-            return completion_text
+            return resp.completion_text.strip() if resp and resp.completion_text else ""
         except Exception as e:
-            logger.error(f"调用 LLM Provider 时出错: {e}", exc_info=True)
+            logger.error(f"LLM Provider Error: {e}", exc_info=True)
             return ""
 
-    async def rewrite(self, query: str, **kwargs) -> Any:
-        """改写查询的抽象方法"""
-        raise NotImplementedError("子类必须实现rewrite方法")
+    def _extract_json(self, text: str) -> Any:
+        """
+        鲁棒的 JSON 提取器
+        支持提取 ```json 包裹的内容，或者直接寻找 { ... } 结构
+        """
+        try:
+            # 1. 尝试直接解析
+            return json.loads(text)
+        except json.JSONDecodeError:
+            # 2. 尝试提取 Markdown 代码块
+            match = re.search(r"```(?:json)?\s*(.*)\s*```", text, re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group(1))
+                except json.JSONDecodeError:
+                    pass
 
+            # 3. 尝试提取最外层的 JSON 对象/数组
+            # 匹配 {...} 或 [...]
+            match = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group(1))
+                except json.JSONDecodeError:
+                    pass
 
-class ContextDependentRewriter(QueryRewriterBase):
-    """上下文依赖型Query改写器"""
+            return None
 
-    async def rewrite(self, current_query: str, conversation_history: str) -> str:
-        """上下文依赖型Query改写"""
-        instruction = """
-你是一个智能的查询优化助手。请分析用户的当前问题以及前序对话历史，判断当前问题是否依赖于上下文。
-如果依赖，请将当前问题改写成一个独立的、包含所有必要上下文信息的完整问题。
-如果不依赖，直接返回原问题。
+    async def rewrite_query(
+        self, query: str, conversation_history: str = ""
+    ) -> List[str]:
+        """
+        核心重写方法
+        返回: List[str] (即使是一个问题也包裹在列表中，方便统一处理)
+        """
+
+        system_prompt = """# Role
+你是一个专业的搜索查询优化专家。你的任务是基于用户当前输入和对话历史，生成适合搜索引擎检索的查询语句列表。
+
+# Instructions
+1. **分析意图**：判断用户输入的是独立问题、追问、还是包含多个子问题。
+2. **指代消解**：如果输入包含“它”、“这个”、“前者”等代词，请根据【对话历史】将其替换为具体实体，同时明确主体，主体词置于最前，修饰词置后。
+3. **去噪与补全**：去除“你好”、“请问”等无意义词汇；补全缺失的主语或宾语。
+4. **多意图拆分**：如果用户一次问了两个不同领域的问题（例如“RAGFlow怎么部署？另外今天天气如何？”），请拆分为两个独立的查询。
+5. **保持原义**：如果用户输入已经非常清晰且独立，请原样返回，不要画蛇添足。
+6. **不要回答**：绝对不要回答用户的问题，只负责重写。
+
+# Output Format
+必须严格输出 JSON 格式，不要包含任何额外文字：
+{
+    "rewritten_queries": ["优化后的查询语句1", "优化后的查询语句2"...]
+}
 """
-        prompt = f"""### 指令 ###
-{instruction}
 
-### 对话历史 ###
-{conversation_history}
+        user_content = f"""
+### Data
+[Conversation History]
+{conversation_history if conversation_history else "无历史记录"}
 
-### 当前问题 ###
-{current_query}
-
-### 改写后的问题 ###
-"""
-        return await self._get_completion(prompt)
-
-
-class ComparativeRewriter(QueryRewriterBase):
-    """对比型Query改写器"""
-
-    async def rewrite(self, query: str, context_info: str) -> str:
-        """对比型Query改写"""
-        instruction = """
-你是一个查询分析专家。请分析用户的输入和相关的对话上下文，识别出问题中需要进行比较的多个对象。
-然后，将原始问题改写成一个更明确、更适合在知识库中检索的对比性查询。
-"""
-        prompt = f"""### 指令 ###
-{instruction}
-
-### 对话历史/上下文信息 ###
-{context_info}
-
-### 原始问题 ###
+[Current User Input]
 {query}
 
-### 改写后的查询 ###
+### Output (JSON Only)
 """
-        return await self._get_completion(prompt)
 
+        # 拼接 Prompt
+        full_prompt = f"{system_prompt}\n{user_content}"
 
-class AmbiguousReferenceRewriter(QueryRewriterBase):
-    """模糊指代型Query改写器"""
+        logger.debug(f"Rewriter Prompt Sent: {query}")
 
-    async def rewrite(self, current_query: str, conversation_history: str) -> str:
-        """模糊指代型Query改写"""
-        instruction = """
-你是一个消除语言歧义的专家。请分析用户的当前问题和对话历史，找出问题中 "都"、"它"、"这个" 等模糊指代词具体指向的对象。
-然后，将这些指代词替换为明确的对象名称，生成一个清晰、无歧义的新问题。
-"""
-        prompt = f"""### 指令 ###
-{instruction}
-
-### 对话历史 ###
-{conversation_history}
-
-### 当前问题 ###
-{current_query}
-
-### 改写后的问题 ###
-"""
-        return await self._get_completion(prompt)
-
-
-class MultiIntentRewriter(QueryRewriterBase):
-    """多意图型Query改写器"""
-
-    async def rewrite(self, query: str) -> List[str]:
-        """多意图型Query改写 - 分解查询"""
-        instruction = """
-你是一个任务分解机器人。请将用户的复杂问题分解成多个独立的、可以单独回答的简单问题。以JSON数组格式输出。
-"""
-        prompt = f"""### 指令 ###
-{instruction}
-
-### 原始问题 ###
-{query}
-
-### 分解后的问题列表 ###
-请以JSON数组格式输出，例如：["问题1", "问题2", "问题3"]
-"""
-        # 尝试解析JSON，如果失败则重试一次LLM调用
+        # 重试机制 (最多 2 次)
         for attempt in range(2):
-            response = await self._get_completion(prompt)
-            if not response:
-                # 如果LLM调用失败，直接回退
-                logger.error("多意图分解器未能从LLM获取响应。")
-                return [query]
-
-            try:
-                cleaned_response = response.strip().replace(
-                    "```json", "").replace("```", "").strip()
-                result = json.loads(cleaned_response)
-                if isinstance(result, list):
-                    return result
-                else:
-                    raise TypeError("JSON响应不是一个列表。")
-            except (json.JSONDecodeError, TypeError) as e:
+            response_text = await self._get_completion(full_prompt)
+            if not response_text:
                 logger.warning(
-                    f"无法解析多意图分解器的JSON响应 (Attempt {attempt + 1}): {e}")
+                    "Empty response from LLM, retrying..."
+                    if attempt == 0
+                    else "Empty response, fallback."
+                )
                 if attempt == 0:
-                    logger.info("将重试LLM调用以获取有效的JSON。")
-                    await asyncio.sleep(1)  # 短暂等待后重试
-                else:
-                    # 第二次尝试仍然失败，回退
-                    logger.error("在重试后，多意图分解器仍无法解析JSON响应，将使用原始响应作为查询。")
-                    return [response]
+                    continue
+                break
 
-        # 如果循环因意外情况结束，则回退
+            data = self._extract_json(response_text)
+
+            if data and isinstance(data, dict) and "rewritten_queries" in data:
+                queries = data["rewritten_queries"]
+                if isinstance(queries, list) and all(
+                    isinstance(q, str) for q in queries
+                ):
+                    logger.info(f"Rewrite Success: {query} -> {queries}")
+                    return queries
+
+            logger.warning(
+                f"Invalid JSON format (Attempt {attempt + 1}): {response_text}"
+            )
+
+        # Fallback: 如果一切都失败了，返回原始查询，避免阻断流程
+        logger.error("Rewrite failed completely, falling back to original query.")
         return [query]
 
 
-class RhetoricalRewriter(QueryRewriterBase):
-    """反问型Query改写器"""
-
-    async def rewrite(self, current_query: str, conversation_history: str) -> str:
-        """反问型Query改写"""
-        instruction = """
-你是一个沟通理解大师。请分析用户的反问或带有情绪的陈述，识别其背后真实的意图和问题。
-然后，将这个反问改写成一个中立、客观、可以直接用于知识库检索的问题。
-"""
-        prompt = f"""### 指令 ###
-{instruction}
-
-### 对话历史 ###
-{conversation_history}
-
-### 当前问题 ###
-{current_query}
-
-### 改写后的问题 ###
-"""
-        return await self._get_completion(prompt)
-
-
-class QueryTypeDetector(QueryRewriterBase):
-    """Query类型检测器"""
-
-    async def detect(self, query: str, conversation_history: str = "", context_info: str = "") -> Dict[str, Any]:
-        """自动识别Query类型"""
-        instruction = """
-你是一个智能的查询分析专家。请分析用户的查询，识别其属于以下哪种类型：
-1. 上下文依赖型 - 包含"还有"、"其他"等需要上下文理解的词汇
-2. 对比型 - 包含"哪个"、"比较"、"更"、"哪个更好"、"哪个更"等比较词汇
-3. 模糊指代型 - 包含"它"、"他们"、"都"、"这个"等指代词
-4. 多意图型 - 包含多个独立问题，用"、"或"？"分隔
-5. 反问型 - 包含"不会"、"难道"等反问语气
-6. 普通型 - 不属于以上任何一种的常规问题。
-
-说明：如果同时存在多意图型、模糊指代型，优先级为多意图型>模糊指代型。请返回最符合的一种类型。
-
-请严格按照以下JSON格式返回结果，不要包含任何其他解释：
-{
-    "query_type": "识别出的查询类型",
-    "confidence": 0.8
-}
-"""
-        prompt = f"""### 指令 ###
-{instruction}
-
-### 对话历史 ###
-{conversation_history}
-
-### 上下文信息 ###
-{context_info}
-
-### 原始查询 ###
-{query}
-
-### 分析结果 (JSON) ###
-"""
-        # 尝试解析JSON，如果失败则重试一次LLM调用
-        for attempt in range(2):
-            response = await self._get_completion(prompt)
-            if not response:
-                # 如果LLM调用失败，直接回退
-                logger.error("查询类型检测器未能从LLM获取响应。")
-                break
-
-            try:
-                cleaned_response = response.strip().replace(
-                    "```json", "").replace("```", "").strip()
-                result = json.loads(cleaned_response)
-                if isinstance(result, dict) and "query_type" in result:
-                    logger.debug(f"查询类型检测结果: {result}")
-                    return result
-                else:
-                    raise TypeError("JSON响应格式不正确。")
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.warning(
-                    f"无法解析查询类型检测器的JSON响应 (Attempt {attempt + 1}): {e}")
-                if attempt == 0:
-                    logger.info("将重试LLM调用以获取有效的JSON。")
-                    await asyncio.sleep(1)  # 短暂等待后重试
-                else:
-                    # 第二次尝试仍然失败，跳出循环使用回退逻辑
-                    break
-
-        # 如果所有尝试都失败，则回退
-        logger.warning("在重试后，查询类型检测器仍无法解析JSON响应，将回退到'普通型'。")
-        return {
-            "query_type": "普通型",
-            "confidence": 0.5
-        }
-
-
-class QueryRewriteManager:
-    """Query改写管理器，负责协调各种改写器"""
-
-    def __init__(self, provider: "Provider"):
-        self.provider = provider
-        self.context_rewriter = ContextDependentRewriter(provider)
-        self.comparative_rewriter = ComparativeRewriter(provider)
-        self.ambiguous_rewriter = AmbiguousReferenceRewriter(provider)
-        self.multi_intent_rewriter = MultiIntentRewriter(provider)
-        self.rhetorical_rewriter = RhetoricalRewriter(provider)
-        self.type_detector = QueryTypeDetector(provider)
-
-    async def rewrite_query(self, query: str, conversation_history: str = "") -> Union[str, List[str]]:
-        """自动识别Query类型并进行改写"""
-        detection_result = await self.type_detector.detect(query, conversation_history)
-        query_type = detection_result.get('query_type', '普通型')
-        logger.info(f"原始查询: '{query}', 检测到的类型: '{query_type}'")
-
-        rewritten_query: Union[str, List[str]] = ""
-
-        if '上下文依赖' in query_type:
-            rewritten_query = await self.context_rewriter.rewrite(query, conversation_history)
-        elif '对比' in query_type:
-            rewritten_query = await self.comparative_rewriter.rewrite(query, conversation_history)
-        elif '模糊指代' in query_type:
-            rewritten_query = await self.ambiguous_rewriter.rewrite(query, conversation_history)
-        elif '多意图' in query_type:
-            rewritten_query = await self.multi_intent_rewriter.rewrite(query)
-        elif '反问' in query_type:
-            rewritten_query = await self.rhetorical_rewriter.rewrite(query, conversation_history)
-        else:
-            # 对于“普通型”或无法识别的类型，返回原始查询
-            rewritten_query = query
-
-        # 如果重写失败（返回空），则回退到原始查询
-        if not rewritten_query:
-            logger.warning(f"查询重写失败或返回空结果，将使用原始查询: '{query}'")
-            rewritten_query = query
-
-        logger.info(f"最终改写结果: {rewritten_query}")
-        return rewritten_query
+# --- 使用示例 ---
+# manager = UnifiedQueryRewriter(provider)
+# queries = await manager.rewrite_query("它支持Docker部署吗？", history="User: RAGFlow是什么？\nAI: RAGFlow是一个开源RAG引擎。")
+# print(queries)
+# Output: ['RAGFlow 支持 Docker 部署吗']

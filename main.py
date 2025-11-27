@@ -10,7 +10,7 @@ from astrbot.core.star.star_tools import StarTools
 from astrbot.api.provider import ProviderRequest, Provider
 
 from .src import helpers
-from .src.rewriter import QueryRewriteManager
+from .src.rewriter import UnifiedQueryRewriter
 
 
 @register("astrbot_plugin_ragflow_adapter", "RC-CHN", "使用RAGFlow检索增强生成", "v0.2")
@@ -21,13 +21,15 @@ class RAGFlowAdapterPlugin(Star):
         self.config = config
         self.plugin_data_dir: Path = StarTools.get_data_dir()
         self.session_message_counts = {}
-        self.query_rewrite_manager: QueryRewriteManager = None
+        self.query_rewrite_manager: UnifiedQueryRewriter = None
         self.rewrite_provider: Provider = None
 
         # 初始化配置变量
         self.ragflow_base_url = ""
         self.ragflow_api_key = ""
         self.ragflow_kb_ids = []
+        self.ragflow_rerank_model = ""
+        self.ragflow_cross_lang = []
         self.enable_query_rewrite = False
         self.query_rewrite_provider_key = ""
         self.rag_injection_method = "system_prompt"
@@ -39,7 +41,7 @@ class RAGFlowAdapterPlugin(Star):
         self.rag_archive_summarize_enabled = False
         self.rag_archive_summarize_persona_id = ""
         self.rag_archive_summarize_provider_id = ""
-        
+
         # UMO 白名单配置
         self.enabled_umo_list = []
 
@@ -53,27 +55,30 @@ class RAGFlowAdapterPlugin(Star):
         self.ragflow_base_url = self.config.get("ragflow_base_url", "")
         self.ragflow_api_key = self.config.get("ragflow_api_key", "")
         self.ragflow_kb_ids = self.config.get("ragflow_kb_ids", [])
-        self.enable_query_rewrite = self.config.get(
-            "enable_query_rewrite", False)
+        self.ragflow_rerank_model = self.config.get("ragflow_rerank_model", "")
+        self.ragflow_cross_lang = self.config.get("ragflow_cross_lang", [])
+        self.enable_query_rewrite = self.config.get("enable_query_rewrite", False)
         self.query_rewrite_provider_key = self.config.get(
-            "query_rewrite_provider_key", "")
+            "query_rewrite_provider_key", ""
+        )
         self.rag_injection_method = self.config.get(
-            "rag_injection_method", "system_prompt")
+            "rag_injection_method", "system_prompt"
+        )
 
         # 加载归档配置
-        self.rag_archive_enabled = self.config.get(
-            "rag_archive_enabled", False)
-        self.rag_archive_dataset_id = self.config.get(
-            "rag_archive_dataset_id", "")
-        self.rag_archive_threshold = self.config.get(
-            "rag_archive_threshold", 40)
+        self.rag_archive_enabled = self.config.get("rag_archive_enabled", False)
+        self.rag_archive_dataset_id = self.config.get("rag_archive_dataset_id", "")
+        self.rag_archive_threshold = self.config.get("rag_archive_threshold", 40)
         self.rag_archive_summarize_enabled = self.config.get(
-            "rag_archive_summarize_enabled", False)
+            "rag_archive_summarize_enabled", False
+        )
         self.rag_archive_summarize_persona_id = self.config.get(
-            "rag_archive_summarize_persona_id", "")
+            "rag_archive_summarize_persona_id", ""
+        )
         self.rag_archive_summarize_provider_id = self.config.get(
-            "rag_archive_summarize_provider_id", "")
-        
+            "rag_archive_summarize_provider_id", ""
+        )
+
         # 加载 UMO 白名单配置
         self.enabled_umo_list = self.config.get("enabled_umo_list", [])
 
@@ -82,16 +87,30 @@ class RAGFlowAdapterPlugin(Star):
         logger.info("=== RAGFlow 适配器配置 ===")
         logger.info(f"  RAGFlow API 地址: {self.ragflow_base_url}")
         logger.info(
-            f"  RAGFlow API Key: {helpers.mask_sensitive_info(self.ragflow_api_key)}")
+            f"  RAGFlow API Key: {helpers.mask_sensitive_info(self.ragflow_api_key)}"
+        )
 
-        masked_kb_ids = [helpers.mask_sensitive_info(
-            str(kid)) for kid in self.ragflow_kb_ids]
+        masked_kb_ids = [
+            helpers.mask_sensitive_info(str(kid)) for kid in self.ragflow_kb_ids
+        ]
         logger.info(f"  RAGFlow 知识库 ID: {masked_kb_ids}")
 
         logger.info(f"  启用查询重写: {'是' if self.enable_query_rewrite else '否'}")
+
+        if len(self.ragflow_cross_lang) > 0:
+            logger.info(f"  RAGFlow 跨语言检索: {', '.join(self.ragflow_cross_lang)}")
+        else:
+            logger.info("  RAGFlow 跨语言检索: 未启用")
+        
+        if self.ragflow_rerank_model:
+            logger.info(f"  RAGFlow 重排序模型: {self.ragflow_rerank_model}")
+        else:
+            logger.info("  RAGFlow 重排序模型: 未启用")
+
         if self.enable_query_rewrite:
             logger.info(
-                f"  查询重写 Provider: {self.query_rewrite_provider_key or '未指定'}")
+                f"  查询重写 Provider: {self.query_rewrite_provider_key or '未指定'}"
+            )
         logger.info(f"  RAG 内容注入方式: {self.rag_injection_method}")
 
         # 打印归档配置日志
@@ -100,13 +119,16 @@ class RAGFlowAdapterPlugin(Star):
             logger.info(f"    归档数据集 ID: {self.rag_archive_dataset_id}")
             logger.info(f"    归档消息阈值: {self.rag_archive_threshold}")
             logger.info(
-                f"    归档前总结: {'是' if self.rag_archive_summarize_enabled else '否'}")
+                f"    归档前总结: {'是' if self.rag_archive_summarize_enabled else '否'}"
+            )
             if self.rag_archive_summarize_enabled:
                 logger.info(
-                    f"      总结 Persona: {self.rag_archive_summarize_persona_id or '未指定'}")
+                    f"      总结 Persona: {self.rag_archive_summarize_persona_id or '未指定'}"
+                )
                 logger.info(
-                    f"      总结 Provider: {self.rag_archive_summarize_provider_id or '未指定'}")
-        
+                    f"      总结 Provider: {self.rag_archive_summarize_provider_id or '未指定'}"
+                )
+
         # 打印 UMO 白名单配置日志
         logger.info(f"  启用 UMO 白名单: {'是' if self.enabled_umo_list else '否'}")
         if self.enabled_umo_list:
@@ -120,14 +142,16 @@ class RAGFlowAdapterPlugin(Star):
             return
 
         self.rewrite_provider = self.context.get_provider_by_id(
-            self.query_rewrite_provider_key)
+            self.query_rewrite_provider_key
+        )
 
         if not self.rewrite_provider:
             logger.error(
-                f"找不到用于查询重写的 Provider (ID: '{self.query_rewrite_provider_key}')。查询重写功能将不可用。")
+                f"找不到用于查询重写的 Provider (ID: '{self.query_rewrite_provider_key}')。查询重写功能将不可用。"
+            )
             return
 
-        self.query_rewrite_manager = QueryRewriteManager(self.rewrite_provider)
+        self.query_rewrite_manager = UnifiedQueryRewriter(self.rewrite_provider)
         logger.info("查询重写管理器已成功初始化。")
 
     @filter.on_astrbot_loaded()
@@ -155,7 +179,9 @@ class RAGFlowAdapterPlugin(Star):
             # 假设历史记录可以通过 event 或 req 获取，这里用一个 placeholder
             # await self._get_formatted_history(event)
             conversation_history = ""
-            rewritten_result = await self.query_rewrite_manager.rewrite_query(req.prompt, conversation_history)
+            rewritten_result = await self.query_rewrite_manager.rewrite_query(
+                req.prompt, conversation_history
+            )
             if isinstance(rewritten_result, list):
                 rewritten_queries.extend(rewritten_result)
             else:
@@ -182,7 +208,8 @@ class RAGFlowAdapterPlugin(Star):
             count = self.session_message_counts.get(session_id, 0) + 1
             self.session_message_counts[session_id] = count
             logger.info(
-                f"会话 '{session_id}' 消息计数: {count}/{self.rag_archive_threshold}")
+                f"会话 '{session_id}' 消息计数: {count}/{self.rag_archive_threshold}"
+            )
 
             if count >= self.rag_archive_threshold:
                 logger.info(f"会话 '{session_id}' 达到归档阈值，准备归档...")
