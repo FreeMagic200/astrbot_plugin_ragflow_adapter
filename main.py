@@ -28,6 +28,7 @@ class RAGFlowAdapterPlugin(Star):
         self.ragflow_base_url = ""
         self.ragflow_api_key = ""
         self.ragflow_kb_ids = []
+        self.ragflow_request_timeout = 30
         self.ragflow_rerank_model = ""
         self.ragflow_cross_lang = []
         self.enable_query_rewrite = False
@@ -55,6 +56,7 @@ class RAGFlowAdapterPlugin(Star):
         self.ragflow_base_url = self.config.get("ragflow_base_url", "")
         self.ragflow_api_key = self.config.get("ragflow_api_key", "")
         self.ragflow_kb_ids = self.config.get("ragflow_kb_ids", [])
+        self.ragflow_request_timeout = self.config.get("ragflow_request_timeout", 30)
         self.ragflow_rerank_model = self.config.get("ragflow_rerank_model", "")
         self.ragflow_cross_lang = self.config.get("ragflow_cross_lang", [])
         self.enable_query_rewrite = self.config.get("enable_query_rewrite", False)
@@ -86,6 +88,7 @@ class RAGFlowAdapterPlugin(Star):
         logger.info("RAGFlow 适配器插件已初始化。")
         logger.info("=== RAGFlow 适配器配置 ===")
         logger.info(f"  RAGFlow API 地址: {self.ragflow_base_url}")
+        logger.info(f"  RAGFlow 请求超时: {self.ragflow_request_timeout} 秒")
         logger.info(
             f"  RAGFlow API Key: {helpers.mask_sensitive_info(self.ragflow_api_key)}"
         )

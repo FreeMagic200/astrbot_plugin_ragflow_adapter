@@ -14,6 +14,11 @@
     "type": "list",
     "default": []
   },
+  "ragflow_request_timeout": {
+    "description": "RAGFlow API 请求超时时间（秒）",
+    "type": "int",
+    "default": 30
+  },
   "ragflow_rerank_model": {
     "description": "RAGFlow 使用的重排序模型",
     "type": "string",

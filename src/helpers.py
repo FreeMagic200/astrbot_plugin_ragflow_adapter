@@ -77,7 +77,7 @@ async def query_ragflow(plugin: "RAGFlowAdapterPlugin", query: str) -> str:
 
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.post(url, headers=headers, json=data, timeout=30.0)
+            response = await client.post(url, headers=headers, json=data, timeout=plugin.ragflow_request_timeout)
             response.raise_for_status()
 
             api_data = response.json()
