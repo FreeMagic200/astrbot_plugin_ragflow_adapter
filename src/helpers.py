@@ -28,7 +28,7 @@ def inject_content_into_request(
 
     # 统一的 RAG 内容模板
     rag_prompt_template = (
-        f"--- 以下是参考资料 ---\n{content}\n--- 请根据以上资料回答问题 ---"
+        f"--- 以下是参考资料 ---\n{content}\n--- 请根据以上资料回答问题，并在回答中注明参考的来源 ---"
     )
 
     if plugin.rag_injection_method == "user_prompt":
@@ -90,10 +90,27 @@ async def query_ragflow(plugin: "RAGFlowAdapterPlugin", query: str) -> str:
                 logger.info("RAGFlow 未检索到相关内容。")
                 return ""
 
-            retrieved_content = "\n\n".join(
-                [chunk.get("content", "") for chunk in chunks]
-            )
-            logger.info(f"成功从 RAGFlow 检索到 {len(chunks)} 条内容。")
+            # 提取内容并附上来源标注
+            # RAGFlow API 返回的 chunk 中文档名称可能是 document_keyword 或 document_name
+            content_with_sources = []
+            seen_sources = set()
+            for chunk in chunks:
+                content = chunk.get("content", "")
+                # 尝试获取文档名称（兼容不同 API 响应格式）
+                source_name = (
+                    chunk.get("document_keyword")
+                    or chunk.get("document_name")
+                    or chunk.get("document_id", "未知来源")
+                )
+                if not source_name:
+                    source_name = "未知来源"
+
+                # 构建带来源的内容
+                content_with_sources.append(f"[来源: {source_name}]\n{content}")
+                seen_sources.add(source_name)
+
+            retrieved_content = "\n\n".join(content_with_sources)
+            logger.info(f"成功从 RAGFlow 检索到 {len(chunks)} 条内容，来源: {list(seen_sources)}")
             logger.debug(f"检索到的内容: \n{retrieved_content}")
             return retrieved_content
 
