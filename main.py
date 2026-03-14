@@ -46,6 +46,9 @@ class RAGFlowAdapterPlugin(Star):
         # UMO 白名单配置
         self.enabled_umo_list = []
 
+        # 触发前缀配置
+        self.trigger_prefix = ""
+
     async def initialize(self):
         """
         初始化插件，加载并打印配置。
@@ -83,6 +86,9 @@ class RAGFlowAdapterPlugin(Star):
 
         # 加载 UMO 白名单配置
         self.enabled_umo_list = self.config.get("enabled_umo_list", [])
+
+        # 加载触发前缀配置
+        self.trigger_prefix = self.config.get("trigger_prefix", "").strip()
 
         # 打印日志
         logger.info("RAGFlow 适配器插件已初始化。")
@@ -136,6 +142,7 @@ class RAGFlowAdapterPlugin(Star):
         logger.info(f"  启用 UMO 白名单: {'是' if self.enabled_umo_list else '否'}")
         if self.enabled_umo_list:
             logger.info(f"    允许的 UMO 列表: {self.enabled_umo_list}")
+        logger.info(f"  触发前缀: '{self.trigger_prefix}' ({'仅前缀消息' if self.trigger_prefix else '所有 LLM 请求'})")
         logger.info("========================")
 
     def _setup_rewriter(self):
@@ -176,6 +183,17 @@ class RAGFlowAdapterPlugin(Star):
             if current_umo not in self.enabled_umo_list:
                 logger.debug(f"UMO '{current_umo}' 不在白名单中，跳过 RAGFlow 处理")
                 return
+
+        # 检查触发前缀
+        query_text = req.prompt
+        if self.trigger_prefix:
+            message_str = event.get_message_str().strip()
+            if not message_str.startswith(self.trigger_prefix):
+                logger.debug(f"消息未以前缀 '{self.trigger_prefix}' 开头，跳过 RAGFlow 处理")
+                return
+            # 去掉前缀后作为实际查询内容
+            query_text = message_str[len(self.trigger_prefix):].strip()
+
         # 1. 重写查询
         rewritten_queries = []
         if self.enable_query_rewrite and self.query_rewrite_manager:
@@ -183,15 +201,15 @@ class RAGFlowAdapterPlugin(Star):
             # await self._get_formatted_history(event)
             conversation_history = ""
             rewritten_result = await self.query_rewrite_manager.rewrite_query(
-                req.prompt, conversation_history
+                query_text, conversation_history
             )
             if isinstance(rewritten_result, list):
                 rewritten_queries.extend(rewritten_result)
             else:
                 rewritten_queries.append(rewritten_result)
-            logger.info(f"查询已重写: '{req.prompt}' -> {rewritten_queries}")
+            logger.info(f"查询已重写: '{query_text}' -> {rewritten_queries}")
         else:
-            rewritten_queries.append(req.prompt)
+            rewritten_queries.append(query_text)
 
         # 2. 对每个重写后的查询执行 RAGFlow 检索
         all_rag_content = []
