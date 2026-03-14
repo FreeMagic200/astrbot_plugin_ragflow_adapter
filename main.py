@@ -7,13 +7,14 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.api import logger
 from astrbot.core.star.star_tools import StarTools
-from astrbot.api.provider import ProviderRequest, Provider
+from astrbot.api.provider import Provider
+from astrbot.core.star.filter.command import GreedyStr
 
 from .src import helpers
 from .src.rewriter import UnifiedQueryRewriter
 
 
-@register("astrbot_plugin_ragflow_adapter", "RC-CHN", "使用RAGFlow检索增强生成", "v0.2")
+@register("astrbot_plugin_ragflow_adapter", "RC-CHN", "使用RAGFlow检索增强生成", "v0.3")
 class RAGFlowAdapterPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -45,9 +46,6 @@ class RAGFlowAdapterPlugin(Star):
 
         # UMO 白名单配置
         self.enabled_umo_list = []
-
-        # 触发前缀配置
-        self.trigger_prefix = ""
 
     async def initialize(self):
         """
@@ -87,9 +85,6 @@ class RAGFlowAdapterPlugin(Star):
         # 加载 UMO 白名单配置
         self.enabled_umo_list = self.config.get("enabled_umo_list", [])
 
-        # 加载触发前缀配置
-        self.trigger_prefix = self.config.get("trigger_prefix", "").strip()
-
         # 打印日志
         logger.info("RAGFlow 适配器插件已初始化。")
         logger.info("=== RAGFlow 适配器配置 ===")
@@ -110,7 +105,7 @@ class RAGFlowAdapterPlugin(Star):
             logger.info(f"  RAGFlow 跨语言检索: {', '.join(self.ragflow_cross_lang)}")
         else:
             logger.info("  RAGFlow 跨语言检索: 未启用")
-        
+
         if self.ragflow_rerank_model:
             logger.info(f"  RAGFlow 重排序模型: {self.ragflow_rerank_model}")
         else:
@@ -142,7 +137,6 @@ class RAGFlowAdapterPlugin(Star):
         logger.info(f"  启用 UMO 白名单: {'是' if self.enabled_umo_list else '否'}")
         if self.enabled_umo_list:
             logger.info(f"    允许的 UMO 列表: {self.enabled_umo_list}")
-        logger.info(f"  触发前缀: '{self.trigger_prefix}' ({'仅前缀消息' if self.trigger_prefix else '所有 LLM 请求'})")
         logger.info("========================")
 
     def _setup_rewriter(self):
@@ -172,10 +166,24 @@ class RAGFlowAdapterPlugin(Star):
         if self.enable_query_rewrite:
             self._setup_rewriter()
 
-    @filter.on_llm_request()
-    async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
+    @filter.command_group("kb", alias={"KB"})
+    def kb(self):
+        """知识库查询（RAGFlow）
+
+        使用 RAGFlow 检索知识库内容，并结合 LLM 生成回答。
+
+        使用方式：
+        /kb q <问题>     向知识库提问
+        /kb search <问题>  同上
         """
-        在 LLM 请求前，自动执行 RAG 检索并注入上下文。
+        pass
+
+    @kb.command("q", alias={"query", "search", "问"})
+    async def kb_query(self, event: AstrMessageEvent, query: GreedyStr):
+        """向知识库提问并获取 LLM 回答
+
+        Args:
+            query: 查询问题
         """
         # 检查 UMO 白名单
         if self.enabled_umo_list:
@@ -184,46 +192,51 @@ class RAGFlowAdapterPlugin(Star):
                 logger.debug(f"UMO '{current_umo}' 不在白名单中，跳过 RAGFlow 处理")
                 return
 
-        # 检查触发前缀
-        query_text = req.prompt
-        if self.trigger_prefix:
-            message_str = event.get_message_str().strip()
-            if not message_str.startswith(self.trigger_prefix):
-                logger.debug(f"消息未以前缀 '{self.trigger_prefix}' 开头，跳过 RAGFlow 处理")
-                return
-            # 去掉前缀后作为实际查询内容
-            query_text = message_str[len(self.trigger_prefix):].strip()
-
         # 1. 重写查询
-        rewritten_queries = []
+        actual_queries = []
         if self.enable_query_rewrite and self.query_rewrite_manager:
-            # 假设历史记录可以通过 event 或 req 获取，这里用一个 placeholder
-            # await self._get_formatted_history(event)
-            conversation_history = ""
             rewritten_result = await self.query_rewrite_manager.rewrite_query(
-                query_text, conversation_history
+                query, ""
             )
             if isinstance(rewritten_result, list):
-                rewritten_queries.extend(rewritten_result)
+                actual_queries.extend(rewritten_result)
             else:
-                rewritten_queries.append(rewritten_result)
-            logger.info(f"查询已重写: '{query_text}' -> {rewritten_queries}")
+                actual_queries.append(rewritten_result)
+            logger.info(f"查询已重写: '{query}' -> {actual_queries}")
         else:
-            rewritten_queries.append(query_text)
+            actual_queries.append(query)
 
         # 2. 对每个重写后的查询执行 RAGFlow 检索
         all_rag_content = []
-        for query in rewritten_queries:
-            content = await helpers.query_ragflow(self, query)
+        for q in actual_queries:
+            content = await helpers.query_ragflow(self, q)
             if content:
                 all_rag_content.append(content)
 
-        # 3. 注入内容
+        # 3. 构建注入了 RAG 内容的 system_prompt
+        system_prompt = None
         if all_rag_content:
-            final_rag_content = "\n\n---\n\n".join(all_rag_content)
-            helpers.inject_content_into_request(self, req, final_rag_content)
+            rag_content = "\n\n---\n\n".join(all_rag_content)
+            system_prompt = (
+                f"--- 以下是参考资料 ---\n{rag_content}\n"
+                "--- 请根据以上资料回答问题，并在回答中注明参考的来源 ---"
+            )
 
-        # 4. 处理自动归档逻辑
+        # 4. 调用 LLM 生成回答
+        umo = event.unified_msg_origin
+        try:
+            provider_id = await self.context.get_current_chat_provider_id(umo=umo)
+            llm_resp = await self.context.llm_generate(
+                chat_provider_id=provider_id,
+                prompt=query,
+                system_prompt=system_prompt,
+            )
+            yield event.plain_result(llm_resp.completion_text)
+        except Exception as e:
+            logger.error(f"调用 LLM 失败: {e}", exc_info=True)
+            yield event.plain_result(f"调用 LLM 时出错：{e}")
+
+        # 5. 处理自动归档逻辑
         if self.rag_archive_enabled:
             session_id = event.get_session_id()
             count = self.session_message_counts.get(session_id, 0) + 1
@@ -234,7 +247,6 @@ class RAGFlowAdapterPlugin(Star):
 
             if count >= self.rag_archive_threshold:
                 logger.info(f"会话 '{session_id}' 达到归档阈值，准备归档...")
-                # 使用 create_task 在后台执行归档，避免阻塞当前请求
                 asyncio.create_task(helpers.archive_conversation(self, event))
                 self.session_message_counts[session_id] = 0
                 logger.info(f"会话 '{session_id}' 消息计数器已重置。")

@@ -86,11 +86,5 @@
     "hint": "为空则表示所有群组都可以使用",
     "type": "list",
     "default": []
-  },
-  "trigger_prefix": {
-    "description": "触发 RAGFlow 检索的消息前缀",
-    "hint": "为空则对所有 LLM 请求启用；填写前缀（如 /kb）则仅当消息以该前缀开头时启用，前缀本身不会传给 LLM",
-    "type": "string",
-    "default": ""
   }
 }
