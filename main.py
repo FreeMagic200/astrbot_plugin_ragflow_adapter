@@ -166,25 +166,19 @@ class RAGFlowAdapterPlugin(Star):
         if self.enable_query_rewrite:
             self._setup_rewriter()
 
-    @filter.command_group("kb", alias={"KB"})
-    def kb(self):
-        """知识库查询（RAGFlow）
-
-        使用 RAGFlow 检索知识库内容，并结合 LLM 生成回答。
-
-        使用方式：
-        /kb q <问题>     向知识库提问
-        /kb search <问题>  同上
-        """
-        pass
-
-    @kb.command("q", alias={"query", "search", "问"})
+    @filter.command("kb", alias={"KB", "知识库"})
     async def kb_query(self, event: AstrMessageEvent, query: GreedyStr):
         """向知识库提问并获取 LLM 回答
+
+        用法：/kb <问题>
 
         Args:
             query: 查询问题
         """
+        if not query:
+            yield event.plain_result("请提供查询问题。用法：/kb <问题>")
+            return
+
         # 检查 UMO 白名单
         if self.enabled_umo_list:
             current_umo = event.unified_msg_origin
