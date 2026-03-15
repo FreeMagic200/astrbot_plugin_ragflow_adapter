@@ -170,13 +170,13 @@ class RAGFlowAdapterPlugin(Star):
     async def kb_query(self, event: AstrMessageEvent, query: GreedyStr):
         """向知识库提问并获取 LLM 回答
 
-        用法：/kb <问题>
+        用法：/ask <问题>
 
         Args:
             query: 查询问题
         """
         if not query:
-            yield event.plain_result("请提供查询问题。用法：/kb <问题>")
+            yield event.plain_result("请提供查询问题。用法：/ask <问题>")
             return
 
         # 检查 UMO 白名单
