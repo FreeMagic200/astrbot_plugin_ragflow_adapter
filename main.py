@@ -166,7 +166,7 @@ class RAGFlowAdapterPlugin(Star):
         if self.enable_query_rewrite:
             self._setup_rewriter()
 
-    @filter.command("ask", alias={"KB", "知识库", "提问", "疑问"})
+    @filter.command("ask", alias={"KB","ASK","Ask", "知识库", "提问", "疑问"})
     async def kb_query(self, event: AstrMessageEvent, query: GreedyStr):
         """向知识库提问并获取 LLM 回答
 
