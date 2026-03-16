@@ -9,6 +9,9 @@ if TYPE_CHECKING:
     from ..main import RAGFlowAdapterPlugin
     from astrbot.api.provider import ProviderRequest
 
+# 哨兵值：RAGFlow API 调用成功但未检索到相关内容
+RETRIEVAL_NO_RESULTS = "__RETRIEVAL_NO_RESULTS__"
+
 
 def mask_sensitive_info(info: str, keep_last: int = 6) -> str:
     """隐藏敏感信息，只显示最后几位。"""
@@ -28,7 +31,12 @@ def inject_content_into_request(
 
     # 统一的 RAG 内容模板
     rag_prompt_template = (
-        f"--- 以下是参考资料 ---\n{content}\n--- 请根据以上资料回答问题，并在回答中注明参考的来源 ---"
+        f"--- 以下是参考资料 ---\n{content}\n--- 参考资料结束 ---\n\n"
+        "请严格按以下格式回答：\n"
+        "1. 先在 <thinking> 标签内进行完整的逻辑推理和证据比对，推理完成后再输出最终结论\n"
+        "2. <thinking> 外的最终结论必须与推理过程保持严格一致，不可前后矛盾\n"
+        "3. 如果参考资料未涉及某个具体知识点，在回答该部分时必须明确标注：【未在知识库中检索到相关信息，以下基于通用知识库作答】\n"
+        "4. 在回答中注明参考的来源文档名称"
     )
 
     if plugin.rag_injection_method == "user_prompt":
@@ -88,7 +96,7 @@ async def query_ragflow(plugin: "RAGFlowAdapterPlugin", query: str) -> str:
             chunks = api_data.get("data", {}).get("chunks", [])
             if not chunks:
                 logger.info("RAGFlow 未检索到相关内容。")
-                return ""
+                return RETRIEVAL_NO_RESULTS
 
             # 提取内容并附上来源标注
             # RAGFlow API 返回的 chunk 中文档名称可能是 document_keyword 或 document_name

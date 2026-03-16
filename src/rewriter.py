@@ -64,34 +64,53 @@ class UnifiedQueryRewriter:
         返回: List[str] (即使是一个问题也包裹在列表中，方便统一处理)
         """
 
-        system_prompt = """# Role
-你是一个专业的搜索查询优化专家。你的任务是基于用户当前输入和对话历史，生成适合搜索引擎检索的查询语句列表。
+        system_prompt = (
+            "# Role\n"
+            "你是一个专业的检索关键词提取专家。你的任务是基于用户当前输入和对话历史，"
+            "提取适合向量检索（Embedding）和关键词检索（BM25）的核心实体/术语列表，"
+            "而不是重写成完整句子。\n"
+            "\n"
+            "# Instructions\n"
+            "1. **提取核心实体**：从用户输入中提取最核心的名词、术语、概念"
+            "（如生物分子名称、化学物质、生物学过程、专有名词等）。\n"
+            "2. **指代消解**：如果输入包含\"它\"、\"这个\"、\"前者\"等代词，"
+            "请根据【对话历史】将其替换为具体实体，主体词置于最前。\n"
+            "3. **去除指令词**：必须去除\"判断正误\"、\"请解释\"、\"是否正确\"、"
+            "\"你好\"、\"请问\"等对检索无意义的指令/修饰词汇，这类词会严重干扰检索效果。\n"
+            "4. **多意图拆分**：如果用户一次问了两个不同领域的问题，"
+            "请拆分为两组独立的关键词。\n"
+            "5. **保持原义**：关键词应准确代表用户真正想检索的知识点，不要增减实质性内容。\n"
+            "6. **不要回答**：绝对不要回答用户的问题，只负责提取关键词。\n"
+            "\n"
+            "# Output Format\n"
+            "必须严格输出 JSON 格式，不要包含任何额外文字。\n"
+            "每组关键词为一个字符串，多个关键词之间用空格分隔：\n"
+            "{\n"
+            '    "rewritten_queries": ["关键词1 关键词2 关键词3", "另一组关键词1 关键词2"]\n'
+            "}\n"
+            "\n"
+            "# Examples\n"
+            "用户输入: \"判断正误 鞘磷脂合成于高尔基体需要VB6和亚铁离子辅助\"\n"
+            '正确输出: {"rewritten_queries": ["鞘磷脂 合成 高尔基体 维生素B6 亚铁离子"]}\n'
+            '错误输出: {"rewritten_queries": ["判断正误 鞘磷脂合成于高尔基体需要VB6和亚铁离子辅助"]}\n'
+            "\n"
+            "用户输入: \"光学显微镜换高倍镜后视野和分辨率如何变化\"\n"
+            '正确输出: {"rewritten_queries": ["光学显微镜 低倍镜 高倍镜 分辨率 数值孔径 视野"]}\n'
+            "\n"
+            "用户输入: \"DNA复制中解旋酶的结合位置是否在前导链模板上\"\n"
+            '正确输出: {"rewritten_queries": ["DNA复制 解旋酶 结合位置 前导链 后随链 原核 真核"]}\n'
+        )
 
-# Instructions
-1. **分析意图**：判断用户输入的是独立问题、追问、还是包含多个子问题。
-2. **指代消解**：如果输入包含“它”、“这个”、“前者”等代词，请根据【对话历史】将其替换为具体实体，同时明确主体，主体词置于最前，修饰词置后。
-3. **去噪与补全**：去除“你好”、“请问”等无意义词汇；补全缺失的主语或宾语。
-4. **多意图拆分**：如果用户一次问了两个不同领域的问题（例如“RAGFlow怎么部署？另外今天天气如何？”），请拆分为两个独立的查询。
-5. **保持原义**：如果用户输入已经非常清晰且独立，请原样返回，不要画蛇添足。
-6. **不要回答**：绝对不要回答用户的问题，只负责重写。
-
-# Output Format
-必须严格输出 JSON 格式，不要包含任何额外文字：
-{
-    "rewritten_queries": ["优化后的查询语句1", "优化后的查询语句2"...]
-}
-"""
-
-        user_content = f"""
-### Data
-[Conversation History]
-{conversation_history if conversation_history else "无历史记录"}
-
-[Current User Input]
-{query}
-
-### Output (JSON Only)
-"""
+        user_content = (
+            "### Data\n"
+            "[Conversation History]\n"
+            f"{conversation_history if conversation_history else '无历史记录'}\n"
+            "\n"
+            "[Current User Input]\n"
+            f"{query}\n"
+            "\n"
+            "### Output (JSON Only)\n"
+        )
 
         # 拼接 Prompt
         full_prompt = f"{system_prompt}\n{user_content}"
@@ -134,4 +153,4 @@ class UnifiedQueryRewriter:
 # manager = UnifiedQueryRewriter(provider)
 # queries = await manager.rewrite_query("它支持Docker部署吗？", history="User: RAGFlow是什么？\nAI: RAGFlow是一个开源RAG引擎。")
 # print(queries)
-# Output: ['RAGFlow 支持 Docker 部署吗']
+# Output: ['RAGFlow Docker 部署']

@@ -1,4 +1,5 @@
 import asyncio
+import re
 import httpx
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from astrbot.api.provider import Provider
 from astrbot.core.star.filter.command import GreedyStr
 
 from .src import helpers
+from .src.helpers import RETRIEVAL_NO_RESULTS
 from .src.rewriter import UnifiedQueryRewriter
 
 
@@ -166,19 +168,8 @@ class RAGFlowAdapterPlugin(Star):
         if self.enable_query_rewrite:
             self._setup_rewriter()
 
-    @filter.command("ask", alias={"KB","ASK","Ask", "知识库", "提问", "疑问"})
-    async def kb_query(self, event: AstrMessageEvent, query: GreedyStr):
-        """向知识库提问并获取 LLM 回答
-
-        用法：/ask <问题>
-
-        Args:
-            query: 查询问题
-        """
-        if not query:
-            yield event.plain_result("请提供查询问题。用法：/ask <问题>")
-            return
-
+    async def _run_kb_query(self, event: AstrMessageEvent, query: str):
+        """核心 RAG 查询逻辑，被命令 handler 和 regex handler 共同调用。"""
         # 检查 UMO 白名单
         if self.enabled_umo_list:
             current_umo = event.unified_msg_origin
@@ -202,9 +193,12 @@ class RAGFlowAdapterPlugin(Star):
 
         # 2. 对每个重写后的查询执行 RAGFlow 检索
         all_rag_content = []
+        retrieval_hit_empty = False  # 标记：API 成功但未检索到内容
         for q in actual_queries:
             content = await helpers.query_ragflow(self, q)
-            if content:
+            if content == RETRIEVAL_NO_RESULTS:
+                retrieval_hit_empty = True
+            elif content:
                 all_rag_content.append(content)
 
         # 3. 构建注入了 RAG 内容的 system_prompt
@@ -213,7 +207,18 @@ class RAGFlowAdapterPlugin(Star):
             rag_content = "\n\n---\n\n".join(all_rag_content)
             system_prompt = (
                 f"--- 以下是参考资料 ---\n{rag_content}\n"
-                "--- 请根据以上资料回答问题，并在回答中注明参考的来源 ---"
+                "--- 参考资料结束 ---\n\n"
+                "请严格按以下格式回答：\n"
+                "1. 先在 <thinking> 标签内进行完整的逻辑推理和证据比对，推理完成后再输出最终结论\n"
+                "2. <thinking> 外的最终结论必须与推理过程保持严格一致，不可前后矛盾\n"
+                "3. 如果参考资料未涉及某个具体知识点，在回答该部分时必须明确标注：【未在知识库中检索到相关信息，以下基于通用知识库作答】\n"
+                "4. 在回答中注明参考的来源文档名称"
+            )
+        elif retrieval_hit_empty:
+            system_prompt = (
+                "【知识库检索结果为空】RAGFlow 知识库中未检索到与该问题相关的参考资料。\n"
+                "请在回答最开头明确告知用户：本次回答未能从知识库中检索到相关信息，以下内容基于通用知识作答，请注意甄别。\n"
+                "回答时先在 <thinking> 标签内进行推理，再给出最终结论，确保前后一致。"
             )
 
         # 4. 调用 LLM 生成回答
@@ -244,6 +249,30 @@ class RAGFlowAdapterPlugin(Star):
                 asyncio.create_task(helpers.archive_conversation(self, event))
                 self.session_message_counts[session_id] = 0
                 logger.info(f"会话 '{session_id}' 消息计数器已重置。")
+
+    @filter.command("ask", alias={"KB", "ASK", "Ask", "知识库", "提问", "疑问"})
+    async def kb_query(self, event: AstrMessageEvent, query: GreedyStr):
+        """向知识库提问并获取 LLM 回答
+
+        用法：/ask <问题>
+
+        Args:
+            query: 查询问题
+        """
+        if not query:
+            yield event.plain_result("请提供查询问题。用法：/ask <问题>")
+            return
+        async for result in self._run_kb_query(event, query):
+            yield result
+
+    @filter.regex(r"(?i)^/ask\S")
+    async def kb_query_nospace(self, event: AstrMessageEvent):
+        """处理 /ask 后没有空格直接跟内容的情况，如 /ask什么是DNA"""
+        query = re.sub(r"(?i)^/ask", "", event.message_str).strip()
+        if not query:
+            return
+        async for result in self._run_kb_query(event, query):
+            yield result
 
     async def terminate(self):
         """
