@@ -86,5 +86,17 @@
     "hint": "为空则表示所有群组都可以使用",
     "type": "list",
     "default": []
+  },
+  "forward_message_threshold": {
+    "description": "QQ 平台回复使用合并转发消息的字数阈值",
+    "hint": "-1=永不转发（纯文本）；0=始终转发；>0=回复字数超过该值时转发",
+    "type": "int",
+    "default": 200
+  },
+  "rag_similarity_threshold": {
+    "description": "RAGFlow 检索相似度阈值，越高则结果越精准但召回越少",
+    "hint": "范围 0.0~1.0，默认 0.45",
+    "type": "float",
+    "default": 0.45
   }
 }

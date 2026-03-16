@@ -3,6 +3,7 @@ import re
 import httpx
 from pathlib import Path
 
+import astrbot.core.message.components as Comp
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.core.config.astrbot_config import AstrBotConfig
@@ -14,6 +15,8 @@ from astrbot.core.star.filter.command import GreedyStr
 from .src import helpers
 from .src.helpers import RETRIEVAL_NO_RESULTS
 from .src.rewriter import UnifiedQueryRewriter
+
+_THINKING_RE = re.compile(r"<thinking>.*?</thinking>", re.DOTALL | re.IGNORECASE)
 
 
 @register("astrbot_plugin_ragflow_adapter", "RC-CHN", "使用RAGFlow检索增强生成", "v0.3")
@@ -48,6 +51,10 @@ class RAGFlowAdapterPlugin(Star):
 
         # UMO 白名单配置
         self.enabled_umo_list = []
+
+        # 转发消息阈值 & 检索相似度
+        self.forward_message_threshold = 200
+        self.rag_similarity_threshold = 0.45
 
     async def initialize(self):
         """
@@ -86,6 +93,10 @@ class RAGFlowAdapterPlugin(Star):
 
         # 加载 UMO 白名单配置
         self.enabled_umo_list = self.config.get("enabled_umo_list", [])
+
+        # 加载转发消息阈值 & 检索相似度
+        self.forward_message_threshold = self.config.get("forward_message_threshold", 200)
+        self.rag_similarity_threshold = self.config.get("rag_similarity_threshold", 0.45)
 
         # 打印日志
         logger.info("RAGFlow 适配器插件已初始化。")
@@ -139,6 +150,8 @@ class RAGFlowAdapterPlugin(Star):
         logger.info(f"  启用 UMO 白名单: {'是' if self.enabled_umo_list else '否'}")
         if self.enabled_umo_list:
             logger.info(f"    允许的 UMO 列表: {self.enabled_umo_list}")
+        logger.info(f"  QQ 转发消息阈值: {self.forward_message_threshold} （-1=不转发，0=始终转发，>0=超字数转发）")
+        logger.info(f"  RAG 检索相似度阈值: {self.rag_similarity_threshold}")
         logger.info("========================")
 
     def _setup_rewriter(self):
@@ -191,11 +204,14 @@ class RAGFlowAdapterPlugin(Star):
         else:
             actual_queries.append(query)
 
-        # 2. 对每个重写后的查询执行 RAGFlow 检索
+        # 2. 对每个重写后的查询执行 RAGFlow 检索（共享去重集合）
         all_rag_content = []
         retrieval_hit_empty = False  # 标记：API 成功但未检索到内容
+        seen_chunk_hashes: set = set()
         for q in actual_queries:
-            content = await helpers.query_ragflow(self, q)
+            content = await helpers.query_ragflow(
+                self, q, query_label=q, seen_chunk_hashes=seen_chunk_hashes
+            )
             if content == RETRIEVAL_NO_RESULTS:
                 retrieval_hit_empty = True
             elif content:
@@ -204,21 +220,19 @@ class RAGFlowAdapterPlugin(Star):
         # 3. 构建注入了 RAG 内容的 system_prompt
         system_prompt = None
         if all_rag_content:
-            rag_content = "\n\n---\n\n".join(all_rag_content)
+            rag_content = "\n\n".join(all_rag_content)
             system_prompt = (
-                f"--- 以下是参考资料 ---\n{rag_content}\n"
+                f"--- 以下是从知识库检索到的参考资料 ---\n{rag_content}\n"
                 "--- 参考资料结束 ---\n\n"
-                "请严格按以下格式回答：\n"
-                "1. 先在 <thinking> 标签内进行完整的逻辑推理和证据比对，推理完成后再输出最终结论\n"
-                "2. <thinking> 外的最终结论必须与推理过程保持严格一致，不可前后矛盾\n"
-                "3. 如果参考资料未涉及某个具体知识点，在回答该部分时必须明确标注：【未在知识库中检索到相关信息，以下基于通用知识库作答】\n"
-                "4. 在回答中注明参考的来源文档名称"
+                "请根据以上参考资料回答用户问题。注意：\n"
+                "1. 优先引用参考资料中的原文内容作答，并在回答中注明来源文档名称\n"
+                "2. 如参考资料未覆盖某知识点，请明确注明【该内容未在知识库中检索到，以下基于通用知识作答】\n"
+                "3. 不要杜撰或添加参考资料中没有的内容"
             )
         elif retrieval_hit_empty:
             system_prompt = (
                 "【知识库检索结果为空】RAGFlow 知识库中未检索到与该问题相关的参考资料。\n"
-                "请在回答最开头明确告知用户：本次回答未能从知识库中检索到相关信息，以下内容基于通用知识作答，请注意甄别。\n"
-                "回答时先在 <thinking> 标签内进行推理，再给出最终结论，确保前后一致。"
+                "请在回答最开头明确告知用户：本次回答未能从知识库中检索到相关信息，以下内容基于通用知识作答，请注意甄别。"
             )
 
         # 4. 调用 LLM 生成回答
@@ -230,7 +244,24 @@ class RAGFlowAdapterPlugin(Star):
                 prompt=query,
                 system_prompt=system_prompt,
             )
-            yield event.plain_result(llm_resp.completion_text)
+
+            # 剥离 <thinking> 标签内容，只保留最终结论
+            final_text = _THINKING_RE.sub("", llm_resp.completion_text).strip()
+
+            # 判断是否在 QQ 平台上使用合并转发消息
+            platform = umo.split(":", 1)[0] if umo else ""
+            threshold = self.forward_message_threshold
+            use_forward = (
+                platform == "aiocqhttp"
+                and threshold != -1
+                and (threshold == 0 or len(final_text) > threshold)
+            )
+
+            if use_forward:
+                node = Comp.Node(uin=0, name="AstrBot", content=[Comp.Plain(final_text)])
+                yield event.chain_result([node])
+            else:
+                yield event.plain_result(final_text)
         except Exception as e:
             logger.error(f"调用 LLM 失败: {e}", exc_info=True)
             yield event.plain_result(f"调用 LLM 时出错：{e}")

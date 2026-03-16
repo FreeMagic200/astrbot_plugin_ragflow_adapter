@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import httpx
 from typing import TYPE_CHECKING
 
@@ -31,12 +32,11 @@ def inject_content_into_request(
 
     # 统一的 RAG 内容模板
     rag_prompt_template = (
-        f"--- 以下是参考资料 ---\n{content}\n--- 参考资料结束 ---\n\n"
-        "请严格按以下格式回答：\n"
-        "1. 先在 <thinking> 标签内进行完整的逻辑推理和证据比对，推理完成后再输出最终结论\n"
-        "2. <thinking> 外的最终结论必须与推理过程保持严格一致，不可前后矛盾\n"
-        "3. 如果参考资料未涉及某个具体知识点，在回答该部分时必须明确标注：【未在知识库中检索到相关信息，以下基于通用知识库作答】\n"
-        "4. 在回答中注明参考的来源文档名称"
+        f"--- 以下是从知识库检索到的参考资料 ---\n{content}\n--- 参考资料结束 ---\n\n"
+        "请根据以上参考资料回答用户问题。注意：\n"
+        "1. 优先引用参考资料中的原文内容作答，并在回答中注明来源文档名称\n"
+        "2. 如参考资料未覆盖某知识点，请明确注明【该内容未在知识库中检索到，以下基于通用知识作答】\n"
+        "3. 不要杜撰或添加参考资料中没有的内容"
     )
 
     if plugin.rag_injection_method == "user_prompt":
@@ -54,15 +54,28 @@ def inject_content_into_request(
         logger.debug("RAG content injected into system_prompt.")
 
 
-async def query_ragflow(plugin: "RAGFlowAdapterPlugin", query: str) -> str:
+async def query_ragflow(
+    plugin: "RAGFlowAdapterPlugin",
+    query: str,
+    query_label: str = "",
+    seen_chunk_hashes: set | None = None,
+) -> str:
     """
     使用给定的查询与 RAGFlow API 进行交互，并返回拼接好的上下文。
+
+    Args:
+        query: 发送给 RAGFlow 的检索词组
+        query_label: 用于在结果中标注来源检索词的标签（通常与 query 相同）
+        seen_chunk_hashes: 跨多次调用共享的已见 chunk 哈希集合，用于去重
     """
     if not all(
         [plugin.ragflow_base_url, plugin.ragflow_api_key, plugin.ragflow_kb_ids]
     ):
         logger.warning("RAGFlow 未完全配置，跳过检索。")
         return ""
+
+    if seen_chunk_hashes is None:
+        seen_chunk_hashes = set()
 
     url = f"{plugin.ragflow_base_url.rstrip('/')}/api/v1/retrieval"
     headers = {
@@ -73,7 +86,7 @@ async def query_ragflow(plugin: "RAGFlowAdapterPlugin", query: str) -> str:
         "question": query,
         "dataset_ids": plugin.ragflow_kb_ids,
         "top_k": 1024,
-        "similarity_threshold": 0.3,
+        "similarity_threshold": plugin.rag_similarity_threshold,
         "vector_similarity_weight": 0.3,
         "cross_languages": plugin.ragflow_cross_lang,
         "keyword": True,
@@ -95,16 +108,24 @@ async def query_ragflow(plugin: "RAGFlowAdapterPlugin", query: str) -> str:
 
             chunks = api_data.get("data", {}).get("chunks", [])
             if not chunks:
-                logger.info("RAGFlow 未检索到相关内容。")
+                logger.info(f"RAGFlow 未检索到相关内容（检索词：{query_label or query}）。")
                 return RETRIEVAL_NO_RESULTS
 
-            # 提取内容并附上来源标注
-            # RAGFlow API 返回的 chunk 中文档名称可能是 document_keyword 或 document_name
+            # 提取内容并附上来源标注，跨 query 去重
             content_with_sources = []
             seen_sources = set()
             for chunk in chunks:
                 content = chunk.get("content", "")
-                # 尝试获取文档名称（兼容不同 API 响应格式）
+                if not content:
+                    continue
+
+                # 去重：同一内容只保留一次
+                content_hash = hashlib.md5(content.encode()).hexdigest()
+                if content_hash in seen_chunk_hashes:
+                    continue
+                seen_chunk_hashes.add(content_hash)
+
+                # 兼容不同 API 响应格式的文档名称字段
                 source_name = (
                     chunk.get("document_keyword")
                     or chunk.get("document_name")
@@ -113,13 +134,21 @@ async def query_ragflow(plugin: "RAGFlowAdapterPlugin", query: str) -> str:
                 if not source_name:
                     source_name = "未知来源"
 
-                # 构建带来源的内容
-                content_with_sources.append(f"[来源: {source_name}]\n{content}")
+                content_with_sources.append(f"【来源：{source_name}】\n原文：{content}")
                 seen_sources.add(source_name)
 
-            retrieved_content = "\n\n".join(content_with_sources)
-            logger.info(f"成功从 RAGFlow 检索到 {len(chunks)} 条内容，来源: {list(seen_sources)}")
-            logger.debug(f"检索到的内容: \n{retrieved_content}")
+            if not content_with_sources:
+                # 所有 chunk 均已在其他 query 中出现，视为无新增内容
+                logger.info(f"检索词「{query_label or query}」的所有结果均为重复 chunk，已跳过。")
+                return RETRIEVAL_NO_RESULTS
+
+            chunks_text = "\n\n".join(content_with_sources)
+            label = query_label or query
+            # 用检索词组标题包裹本次检索结果
+            retrieved_content = f"=== 检索词组：{label} ===\n{chunks_text}"
+
+            logger.info(f"成功从 RAGFlow 检索到 {len(content_with_sources)} 条内容（检索词：{label}），来源: {list(seen_sources)}")
+            logger.debug(f"检索到的内容:\n{retrieved_content}")
             return retrieved_content
 
     except httpx.RequestError as e:
